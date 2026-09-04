@@ -2,6 +2,10 @@
 
 A [Codex CLI hook](https://learn.chatgpt.com/docs/hooks) that opens completed responses in a browser with better Markdown rendering, including LaTeX math via MathML. It keeps each session's prompts and responses on one page with a turn index.
 
+## Showcase
+
+![Codex Markdown Preview showcase](showcase.png)
+
 Requires Python 3.9+ and [Pandoc](https://pandoc.org/) on `PATH`.
 
 Add `hooks = true` to your existing `[features]` table in `~/.codex/config.toml`, then add the hooks below and replace `/absolute/path`:
