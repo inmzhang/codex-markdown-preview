@@ -40,7 +40,7 @@ async function refresh() {
     current = html;
     waiting.hidden = true;
     frame.hidden = false;
-    frame.srcdoc = html;
+    frame.src = `preview.html?${Date.now()}`;
   } catch {}
 }
 refresh();
