@@ -166,6 +166,39 @@ def prompt_path(event, output_dir):
     return output_dir / f".prompt-{turn_key}.md"
 
 
+def transcript_prompts(event):
+    prompts = {}
+    try:
+        transcript = Path(event["transcript_path"]).open(encoding="utf-8")
+    except (KeyError, OSError, TypeError):
+        return prompts
+
+    with transcript:
+        for line in transcript:
+            try:
+                message = json.loads(line).get("payload") or {}
+            except json.JSONDecodeError:
+                continue
+            metadata = message.get("internal_chat_message_metadata_passthrough") or {}
+            turn_id = metadata.get("turn_id")
+            if (
+                message.get("role") != "user"
+                or not turn_id
+                or "user.text" not in metadata.get("content_item_kinds", [])
+            ):
+                continue
+            prompt = next(
+                (
+                    part.get("text", "")
+                    for part in reversed(message.get("content", []))
+                    if part.get("type") == "input_text"
+                ),
+                "",
+            )
+            prompts.setdefault(turn_id, prompt)
+    return prompts
+
+
 def markdown_document(history):
     navigation = ["<nav id=\"TOC\" aria-label=\"Turn history\"><strong>Turns</strong><ol>"]
     sections = []
@@ -256,6 +289,13 @@ def archive_turn(event, output_dir):
             prompt = pending_prompt.read_text(encoding="utf-8")
         except FileNotFoundError:
             prompt = existing.get("prompt", "") if existing else ""
+        if not prompt or any(not turn.get("prompt") for turn in history):
+            prompts = transcript_prompts(event)
+            prompt = prompt or prompts.get(turn_id, "")
+            for saved_turn in history:
+                saved_turn["prompt"] = saved_turn.get("prompt") or prompts.get(
+                    saved_turn.get("turn_id"), ""
+                )
         turn = {"turn_id": turn_id, "prompt": prompt, "assistant": message}
         if existing:
             history[history.index(existing)] = turn
@@ -352,9 +392,11 @@ def run_check():
         environment = os.environ.copy()
         environment["XDG_CACHE_HOME"] = cache_root
         environment["BROWSER"] = "true"
+        transcript_path = Path(cache_root) / "transcript.jsonl"
         common = {
             "session_id": "markdown-preview-check",
             "cwd": os.getcwd(),
+            "transcript_path": str(transcript_path),
         }
 
         def invoke(hook_event_name, **fields):
@@ -370,12 +412,36 @@ def run_check():
             assert result.stdout.strip() == "{}"
 
         try:
-            invoke("UserPromptSubmit", turn_id="one", prompt="First prompt")
+            transcript_path.write_text(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "First prompt"}],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": "one",
+                                "content_item_kinds": ["user.text"],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             invoke(
                 "Stop",
                 turn_id="one",
                 last_assistant_message=r"Euler: $e^{i\pi}+1=0$",
             )
+            history_path = next(
+                (Path(cache_root) / "codex" / "markdown-preview").glob("*/history.json")
+            )
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            assert history[0]["prompt"] == "First prompt"
+            history[0]["prompt"] = ""
+            history_path.write_text(json.dumps(history), encoding="utf-8")
             invoke("UserPromptSubmit", turn_id="two", prompt="- Second prompt\n- Prompt item")
             invoke(
                 "Stop",
