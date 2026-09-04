@@ -195,6 +195,21 @@ def transcript_prompts(event):
                 ),
                 "",
             )
+            images = (
+                part.get("image_url")
+                for part in message.get("content", [])
+                if part.get("type") == "input_image"
+            )
+            for number, image in enumerate(images, 1):
+                if (
+                    isinstance(image, str)
+                    and image.startswith("data:image/")
+                    and ";base64," in image
+                ):
+                    prompt = prompt.replace(
+                        f"[Image #{number}]",
+                        f'<img src="{image}" alt="Image #{number}">',
+                    )
             prompts.setdefault(turn_id, prompt)
     return prompts
 
@@ -289,12 +304,18 @@ def archive_turn(event, output_dir):
             prompt = pending_prompt.read_text(encoding="utf-8")
         except FileNotFoundError:
             prompt = existing.get("prompt", "") if existing else ""
-        if not prompt or any(not turn.get("prompt") for turn in history):
+        if (
+            not prompt
+            or "[Image #" in prompt
+            or any(
+                not turn.get("prompt") or "[Image #" in turn["prompt"] for turn in history
+            )
+        ):
             prompts = transcript_prompts(event)
-            prompt = prompt or prompts.get(turn_id, "")
+            prompt = prompts.get(turn_id) or prompt
             for saved_turn in history:
-                saved_turn["prompt"] = saved_turn.get("prompt") or prompts.get(
-                    saved_turn.get("turn_id"), ""
+                saved_turn["prompt"] = (
+                    prompts.get(saved_turn.get("turn_id")) or saved_turn.get("prompt", "")
                 )
         turn = {"turn_id": turn_id, "prompt": prompt, "assistant": message}
         if existing:
@@ -393,6 +414,7 @@ def run_check():
         environment["XDG_CACHE_HOME"] = cache_root
         environment["BROWSER"] = "true"
         transcript_path = Path(cache_root) / "transcript.jsonl"
+        image = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
         common = {
             "session_id": "markdown-preview-check",
             "cwd": os.getcwd(),
@@ -411,21 +433,36 @@ def run_check():
             )
             assert result.stdout.strip() == "{}"
 
+        def transcript_message(turn_id, *content):
+            return json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": content,
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": turn_id,
+                        "content_item_kinds": [
+                            part["type"].replace("input_", "user.") for part in content
+                        ],
+                    },
+                },
+            })
+
         try:
             transcript_path.write_text(
-                json.dumps(
-                    {
-                        "type": "response_item",
-                        "payload": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "First prompt"}],
-                            "internal_chat_message_metadata_passthrough": {
-                                "turn_id": "one",
-                                "content_item_kinds": ["user.text"],
+                "\n".join(
+                    [
+                        transcript_message("one", {"type": "input_text", "text": "First prompt"}),
+                        transcript_message(
+                            "two",
+                            {"type": "input_image", "image_url": image},
+                            {
+                                "type": "input_text",
+                                "text": "- Second prompt\n- Prompt item\n\n[Image #1]",
                             },
-                        },
-                    }
+                        ),
+                    ]
                 )
                 + "\n",
                 encoding="utf-8",
@@ -442,7 +479,11 @@ def run_check():
             assert history[0]["prompt"] == "First prompt"
             history[0]["prompt"] = ""
             history_path.write_text(json.dumps(history), encoding="utf-8")
-            invoke("UserPromptSubmit", turn_id="two", prompt="- Second prompt\n- Prompt item")
+            invoke(
+                "UserPromptSubmit",
+                turn_id="two",
+                prompt="- Second prompt\n- Prompt item\n\n[Image #1]",
+            )
             invoke(
                 "Stop",
                 turn_id="two",
@@ -454,6 +495,7 @@ def run_check():
             assert "<math" in preview and 'href="#turn-2"' in preview
             assert preview.index("Second answer") < preview.index("Euler")
             assert "First prompt" in preview and "Second prompt" in preview
+            assert f'src="{image}"' in preview and 'alt="Image #1"' in preview
             assert "Turn 1" not in preview and 'class="label answer"' in preview
             assert "Codex Markdown Preview" not in preview
             assert "<li>Second prompt</li>" in preview and "<li>Second answer</li>" in preview
